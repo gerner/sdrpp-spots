@@ -1,6 +1,9 @@
+#include <utils/networking.h>
 #include <imgui.h>
 #include <module.h>
 #include <gui/gui.h>
+
+#define MAX_COMMAND_LENGTH 8192
 
 SDRPP_MOD_INFO{
     /* Name:            */ "sdrpp-spots",
@@ -30,6 +33,8 @@ public:
     SpotsModule(std::string name) {
         this->name = name;
 
+        strcpy(hostname, "localhost");
+
         fftRedrawHandler.ctx = this;
         fftRedrawHandler.handler = fftRedraw;
 
@@ -44,9 +49,14 @@ public:
     ~SpotsModule() {
         gui::menu.removeEntry(name);
         gui::waterfall.onFFTRedraw.unbindHandler(&fftRedrawHandler);
+
+        if (client) { client->close(); }
+        if (listener) { listener->close(); }
     }
 
-    void postInit() {}
+    void postInit() {
+        startServer();
+    }
 
     void enable() {
         enabled = true;
@@ -91,8 +101,64 @@ private:
         }
     }
 
+    static void dataHandler(int count, uint8_t* data, void* ctx) {
+        SpotsModule* _this = (SpotsModule*)ctx;
+
+        for (int i = 0; i < count; i++) {
+            if (data[i] == '\n') {
+                _this->commandHandler(_this->command);
+                _this->command.clear();
+                continue;
+            }
+            if (_this->command.size() < MAX_COMMAND_LENGTH) { _this->command += (char)data[i]; }
+        }
+
+        _this->client->readAsync(1024, _this->dataBuf, dataHandler, _this, false);
+    }
+
+    static void clientHandler(net::Conn _client, void* ctx) {
+        SpotsModule* _this = (SpotsModule*)ctx;
+        flog::info("New spot client!");
+
+        _this->client = std::move(_client);
+        _this->client->readAsync(1024, _this->dataBuf, dataHandler, _this, false);
+        _this->client->waitForEnd();
+        _this->client->close();
+
+        flog::info("Spot client disconnected!");
+
+        _this->listener->acceptAsync(clientHandler, _this);
+    }
+
+    void commandHandler(std::string cmd) {
+        flog::info("spot command: {0}", cmd);
+    }
+
+    void startServer() {
+        try {
+            listener = net::listen(hostname, port);
+            listener->acceptAsync(clientHandler, this);
+        }
+        catch (const std::exception& e) {
+            flog::error("Could not start spot server: {}", e.what());
+        }
+    }
+
+    void stopServer() {
+        if (client) { client->close(); }
+        listener->close();
+    }
+
     std::string name;
     bool enabled = true;
+
+    char hostname[1024];
+    int port = 6214;
+    uint8_t dataBuf[1024];
+    net::Listener listener;
+    net::Conn client;
+
+    std::string command = "";
 
     EventHandler<ImGui::WaterFall::FFTRedrawArgs> fftRedrawHandler;
 

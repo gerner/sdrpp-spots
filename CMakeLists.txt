@@ -3,5 +3,11 @@ project(sdrpp-spots)
 
 file(GLOB SRC "src/*.cpp")
 
-#set(SDRPP_MODULE_COMPILER_FLAGS -O3 -std=c++17 -Wno-unused-command-line-argument -undefined dynamic_lookup)
 include(${SDRPP_MODULE_CMAKE})
+
+#add_library(${PROJECT_NAME} SHARED ${SRC})
+#target_link_libraries(${PROJECT_NAME} PRIVATE sdrpp_core)
+#set_target_properties(${PROJECT_NAME} PROPERTIES PREFIX "")
+#target_include_directories(${PROJECT_NAME} PRIVATE "src/")
+#set(SDRPP_MODULE_COMPILER_FLAGS @SDRPP_MODULE_COMPILER_FLAGS@)
+#install(TARGETS ${PROJECT_NAME} DESTINATION lib/sdrpp/plugins)

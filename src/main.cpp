@@ -3,7 +3,7 @@
 #include <gui/gui.h>
 
 SDRPP_MOD_INFO{
-    /* Name:            */ "spots",
+    /* Name:            */ "sdrpp-spots",
     /* Description:     */ "Display spots on the band chart",
     /* Author:          */ "gerner",
     /* Version:         */ 0, 1, 0,
@@ -29,11 +29,21 @@ class SpotsModule : public ModuleManager::Instance {
 public:
     SpotsModule(std::string name) {
         this->name = name;
+
+        fftRedrawHandler.ctx = this;
+        fftRedrawHandler.handler = fftRedraw;
+
         gui::menu.registerEntry(name, menuHandler, this, NULL);
+        gui::waterfall.onFFTRedraw.bindHandler(&fftRedrawHandler);
+
+        waterfallSpots.push_back({"test1", 28250000});
+        waterfallSpots.push_back({"test2", 28500000});
+        waterfallSpots.push_back({"test3", 28750000});
     }
 
     ~SpotsModule() {
         gui::menu.removeEntry(name);
+        gui::waterfall.onFFTRedraw.unbindHandler(&fftRedrawHandler);
     }
 
     void postInit() {}
@@ -56,8 +66,37 @@ private:
         ImGui::Text("Hello SDR++, my name is %s", _this->name.c_str());
     }
 
+    static void fftRedraw(ImGui::WaterFall::FFTRedrawArgs args, void* ctx) {
+        SpotsModule* _this = (SpotsModule*)ctx;
+
+        for (auto const spot : _this->waterfallSpots) {
+            double centerXpos = args.min.x + std::round((spot.frequency - args.lowFreq) * args.freqToPixelRatio);
+
+            if (spot.frequency >= args.lowFreq && spot.frequency <= args.highFreq) {
+                args.window->DrawList->AddLine(ImVec2(centerXpos, args.min.y), ImVec2(centerXpos, args.max.y), IM_COL32(255, 255, 0, 255));
+            }
+
+            ImVec2 nameSize = ImGui::CalcTextSize(spot.label.c_str());
+            ImVec2 rectMin = ImVec2(centerXpos - (nameSize.x / 2) - 5, args.min.y);
+            ImVec2 rectMax = ImVec2(centerXpos + (nameSize.x / 2) + 5, args.min.y + nameSize.y);
+            ImVec2 clampedRectMin = ImVec2(std::clamp<double>(rectMin.x, args.min.x, args.max.x), rectMin.y);
+            ImVec2 clampedRectMax = ImVec2(std::clamp<double>(rectMax.x, args.min.x, args.max.x), rectMax.y);
+
+            if (clampedRectMax.x - clampedRectMin.x > 0) {
+                args.window->DrawList->AddRectFilled(clampedRectMin, clampedRectMax, IM_COL32(255, 255, 0, 255));
+            }
+            if (rectMin.x >= args.min.x && rectMax.x <= args.max.x) {
+                args.window->DrawList->AddText(ImVec2(centerXpos - (nameSize.x / 2), args.min.y), IM_COL32(0, 0, 0, 255), spot.label.c_str());
+            }
+        }
+    }
+
     std::string name;
     bool enabled = true;
+
+    EventHandler<ImGui::WaterFall::FFTRedrawArgs> fftRedrawHandler;
+
+    std::vector<WaterfallSpot> waterfallSpots;
 };
 
 MOD_EXPORT void _INIT_() {

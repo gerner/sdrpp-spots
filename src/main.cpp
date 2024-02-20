@@ -1,3 +1,7 @@
+#include <iostream>
+#include <sstream>
+#include <vector>
+#include <list>
 #include <utils/networking.h>
 #include <imgui.h>
 #include <module.h>
@@ -22,10 +26,83 @@ SDRPP_MOD_INFO{
  * 2. draw spots: place on waterfall, similar to frequency_manager
  **********************************************/
 
+std::vector<std::string> split(const std::string &s, char delim) {
+    std::vector<std::string> result;
+    std::stringstream ss (s);
+    std::string item;
+
+    while (getline (ss, item, delim)) {
+        result.push_back (item);
+    }
+
+    return result;
+}
+
+int parseTime(const std::string &s, std::chrono::time_point<std::chrono::system_clock>* t) {
+    std::tm tm{};
+    // HHMM YYYY-mm-dd
+    size_t loc = s.find(" ");
+    if(loc == s.npos || loc+1 >= s.size()) {
+        return 1;
+    }
+    std::string timeS = s.substr(0, loc);
+    int time = std::stoi(timeS);
+    if(time < 0) {
+        return 1;
+    }
+    tm.tm_sec = 0;
+    tm.tm_min = time % 100;
+    if(tm.tm_min >= 60) {
+        return 1;
+    }
+    tm.tm_hour = time / 100;
+    if(tm.tm_hour >= 24) {
+        return 1;
+    }
+
+    std::string dateS = s.substr(loc+1);
+    loc = dateS.find("-");
+    if(loc == s.npos || loc+1 >= dateS.size()) {
+        return 1;
+    }
+    std::string yearS = dateS.substr(0, loc);
+    int year = std::stoi(yearS);
+    if(year < 0) {
+        return 1;
+    }
+    dateS = dateS.substr(loc+1);
+    loc = dateS.find("-");
+    if(loc == s.npos || loc+1 >= dateS.size()) {
+        return 1;
+    }
+    std::string monthS = dateS.substr(0, loc);
+    int month = std::stoi(monthS);
+    if(month < 1 || month > 12) {
+        return 1;
+    }
+    std::string dayS = dateS.substr(loc+1);
+    int day = std::stoi(dayS);
+    if(day < 1 || day > 31) {
+        return 1;
+    }
+
+    tm.tm_year = year - 1900;
+    tm.tm_mon = month-1; // Jan = 0
+    tm.tm_mday = day;
+    tm.tm_isdst = 0;
+
+    // from https://stackoverflow.com/a/38298359
+    std::time_t tLocal = std::mktime(&tm);
+    time_t tUTC = tLocal + (std::mktime(std::localtime(&tLocal)) - std::mktime(std::gmtime(&tLocal)));
+    *t = std::chrono::system_clock::from_time_t(tUTC);
+
+    return 0;
+}
+
 struct WaterfallSpot {
     std::string label;
     double frequency;
-    //TODO: spot time so we can expire spots
+    std::chrono::time_point<std::chrono::system_clock> spotTime;
 };
 
 class SpotsModule : public ModuleManager::Instance {
@@ -33,6 +110,7 @@ public:
     SpotsModule(std::string name) {
         this->name = name;
 
+        //TODO: config initialization
         strcpy(hostname, "localhost");
 
         fftRedrawHandler.ctx = this;
@@ -40,10 +118,6 @@ public:
 
         gui::menu.registerEntry(name, menuHandler, this, NULL);
         gui::waterfall.onFFTRedraw.bindHandler(&fftRedrawHandler);
-
-        waterfallSpots.push_back({"test1", 28250000});
-        waterfallSpots.push_back({"test2", 28500000});
-        waterfallSpots.push_back({"test3", 28750000});
     }
 
     ~SpotsModule() {
@@ -74,19 +148,33 @@ private:
     static void menuHandler(void* ctx) {
         SpotsModule* _this = (SpotsModule*)ctx;
         ImGui::Text("Hello SDR++, my name is %s", _this->name.c_str());
+        //TODO: config
+        //TODO: start/stop server
     }
 
     static void fftRedraw(ImGui::WaterFall::FFTRedrawArgs args, void* ctx) {
         SpotsModule* _this = (SpotsModule*)ctx;
 
-        for (auto const spot : _this->waterfallSpots) {
-            double centerXpos = args.min.x + std::round((spot.frequency - args.lowFreq) * args.freqToPixelRatio);
+        std::lock_guard lk(_this->waterfallMutex);
+        auto expirationTime = std::chrono::system_clock::now() - _this->spotLifetime;
+        for (auto it = _this->waterfallSpots.begin(); it != _this->waterfallSpots.end();) {
 
-            if (spot.frequency >= args.lowFreq && spot.frequency <= args.highFreq) {
+            // handle expiration of spots
+            if(it->spotTime < expirationTime) {
+                //flog::info("{0} expired {1} < {2}", it->label, std::chrono::system_clock::to_time_t(it->spotTime), std::chrono::system_clock::to_time_t(expirationTime));
+                it = _this->waterfallSpots.erase(it);
+                continue;
+            //} else {
+                //flog::info("{0} not expired {1} < {2}", it->label, std::chrono::system_clock::to_time_t(it->spotTime), std::chrono::system_clock::to_time_t(expirationTime));
+            }
+
+            double centerXpos = args.min.x + std::round((it->frequency - args.lowFreq) * args.freqToPixelRatio);
+
+            if (it->frequency >= args.lowFreq && it->frequency <= args.highFreq) {
                 args.window->DrawList->AddLine(ImVec2(centerXpos, args.min.y), ImVec2(centerXpos, args.max.y), IM_COL32(255, 255, 0, 255));
             }
 
-            ImVec2 nameSize = ImGui::CalcTextSize(spot.label.c_str());
+            ImVec2 nameSize = ImGui::CalcTextSize(it->label.c_str());
             ImVec2 rectMin = ImVec2(centerXpos - (nameSize.x / 2) - 5, args.min.y);
             ImVec2 rectMax = ImVec2(centerXpos + (nameSize.x / 2) + 5, args.min.y + nameSize.y);
             ImVec2 clampedRectMin = ImVec2(std::clamp<double>(rectMin.x, args.min.x, args.max.x), rectMin.y);
@@ -96,14 +184,18 @@ private:
                 args.window->DrawList->AddRectFilled(clampedRectMin, clampedRectMax, IM_COL32(255, 255, 0, 255));
             }
             if (rectMin.x >= args.min.x && rectMax.x <= args.max.x) {
-                args.window->DrawList->AddText(ImVec2(centerXpos - (nameSize.x / 2), args.min.y), IM_COL32(0, 0, 0, 255), spot.label.c_str());
+                args.window->DrawList->AddText(ImVec2(centerXpos - (nameSize.x / 2), args.min.y), IM_COL32(0, 0, 0, 255), it->label.c_str());
             }
+
+            // make sure to get the next element in the spot list!
+            ++it;
         }
     }
 
     static void dataHandler(int count, uint8_t* data, void* ctx) {
         SpotsModule* _this = (SpotsModule*)ctx;
 
+        // read up to newline
         for (int i = 0; i < count; i++) {
             if (data[i] == '\n') {
                 _this->commandHandler(_this->command);
@@ -132,6 +224,67 @@ private:
 
     void commandHandler(std::string cmd) {
         flog::info("spot command: {0}", cmd);
+
+        // command format: COMMAND [\t args...]
+        // spot command: DX \t SPOTTER \t FREQ \t DX \t COMMENT \t TIME"
+        std::string resp;
+        std::vector<std::string> commandParts = split(cmd, '\t');
+        if(commandParts.size() == 0) {
+            resp = "1 ERROR\n";
+            client->write(resp.size(), (uint8_t*)resp.c_str());
+            return;
+        }
+
+        if("DX" == commandParts[0]) {
+            if(commandParts.size() < 6) {
+                resp = "1 ERROR\n";
+                client->write(resp.size(), (uint8_t*)resp.c_str());
+                return;
+            }
+
+            // frequency comes in kHz
+            double frequency = std::stod(commandParts[2]);
+            if(frequency <= 0) {
+                resp = "1 ERROR\n";
+                client->write(resp.size(), (uint8_t*)resp.c_str());
+                return;
+            }
+            frequency *= 1000;
+
+            // time is HHMM YYYY-MM-DD
+            std::chrono::time_point<std::chrono::system_clock> spotTime;
+            if(parseTime(commandParts[5], &spotTime) != 0) {
+                resp = "1 ERROR\n";
+                client->write(resp.size(), (uint8_t*)resp.c_str());
+                return;
+            }
+
+            std::string label = commandParts[3];
+
+            {
+                bool found = false;
+                std::lock_guard lk(waterfallMutex);
+                // see if we already have a corresponding spot
+                for(auto spot : waterfallSpots) {
+                    if(spot.label == label) {
+                        found = true;
+                        if(spotTime > spot.spotTime) {
+                            spot.spotTime = spotTime;
+                            spot.frequency = frequency;
+                        }
+                        break;
+                    }
+                }
+                // if so, update it
+                // if not, add it
+                if(!found) {
+                    waterfallSpots.push_back({commandParts[3], frequency, spotTime});
+                }
+            }
+
+            resp = "0 OK\n";
+            client->write(resp.size(), (uint8_t*)resp.c_str());
+        }
     }
 
     void startServer() {
@@ -149,8 +302,27 @@ private:
         listener->close();
     }
 
+    /*void worker() {
+        // a comment in discord_integration claims SDR++ author is working on a
+        // timer which we should probably be using
+        while (workerRunning) {
+            std::unique_lock cv_lk(m);
+            cv.wait_for(cv_lk, 10000ms);
+            if(!workerRunning) {
+                return;
+            }
+
+            // expire spots
+            {
+                std::lock_guard lk(waterfallMutex);
+            }
+        }
+    }*/
+
     std::string name;
     bool enabled = true;
+
+    std::chrono::duration<int64_t> spotLifetime = std::chrono::minutes(30);
 
     char hostname[1024];
     int port = 6214;
@@ -162,7 +334,16 @@ private:
 
     EventHandler<ImGui::WaterFall::FFTRedrawArgs> fftRedrawHandler;
 
-    std::vector<WaterfallSpot> waterfallSpots;
+    std::list<WaterfallSpot> waterfallSpots;
+    std::mutex waterfallMutex;
+
+    /*
+    // Threading
+    std::thread workerThread;
+    bool workerRunning;
+    std::condition_variable cv;
+    std::mutex m;
+    */
 };
 
 MOD_EXPORT void _INIT_() {

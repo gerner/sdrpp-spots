@@ -157,6 +157,10 @@ private:
 
         std::lock_guard lk(_this->waterfallMutex);
         auto expirationTime = std::chrono::system_clock::now() - _this->spotLifetime;
+
+        std::vector<float> lanePositions;
+        float laneHeight = ImGui::CalcTextSize("TEST").y + 2;
+        int laneLimit = 8;
         for (auto it = _this->waterfallSpots.begin(); it != _this->waterfallSpots.end();) {
 
             // handle expiration of spots
@@ -168,23 +172,54 @@ private:
                 //flog::info("{0} not expired {1} < {2}", it->label, std::chrono::system_clock::to_time_t(it->spotTime), std::chrono::system_clock::to_time_t(expirationTime));
             }
 
-            double centerXpos = args.min.x + std::round((it->frequency - args.lowFreq) * args.freqToPixelRatio);
-
-            if (it->frequency >= args.lowFreq && it->frequency <= args.highFreq) {
-                args.window->DrawList->AddLine(ImVec2(centerXpos, args.min.y), ImVec2(centerXpos, args.max.y), IM_COL32(255, 255, 0, 255));
+            // skip spots outside waterfall frequency range
+            if (it->frequency < args.lowFreq && it->frequency < args.highFreq) {
+                ++it;
+                continue;
             }
 
+            double centerXpos = args.min.x + std::round((it->frequency - args.lowFreq) * args.freqToPixelRatio);
+
             ImVec2 nameSize = ImGui::CalcTextSize(it->label.c_str());
-            ImVec2 rectMin = ImVec2(centerXpos - (nameSize.x / 2) - 5, args.min.y);
-            ImVec2 rectMax = ImVec2(centerXpos + (nameSize.x / 2) + 5, args.min.y + nameSize.y);
+            float leftEdge = centerXpos - (nameSize.x/2) - 5;
+            float rightEdge = centerXpos + (nameSize.x/2) + 5;
+
+            // choose a "lane" for the label to go in
+            // highest lane that it'll fit
+            // if none, add a lane
+            float targetY = -1;
+            int i = 0;
+            for(auto laneIt = lanePositions.begin(); laneIt != lanePositions.end(); laneIt++) {
+                if(leftEdge - 2 >= *laneIt) {
+                    *laneIt = rightEdge;
+                    targetY = args.min.y + i * laneHeight;
+                    break;
+                }
+                i++;
+            }
+            if(targetY < 0) {
+                if(i < laneLimit) {
+                    targetY = args.min.y + i * laneHeight;
+                    lanePositions.push_back(rightEdge);
+                } else {
+                    // sorry, no space
+                    ++it;
+                    continue;
+                }
+            }
+
+            if (it->frequency >= args.lowFreq && it->frequency <= args.highFreq) {
+                args.window->DrawList->AddLine(ImVec2(centerXpos, targetY), ImVec2(centerXpos, args.max.y), IM_COL32(255, 255, 0, 255));
+            }
+
+            ImVec2 rectMin = ImVec2(centerXpos - (nameSize.x / 2) - 5, targetY);
+            ImVec2 rectMax = ImVec2(centerXpos + (nameSize.x / 2) + 5, targetY + nameSize.y);
             ImVec2 clampedRectMin = ImVec2(std::clamp<double>(rectMin.x, args.min.x, args.max.x), rectMin.y);
             ImVec2 clampedRectMax = ImVec2(std::clamp<double>(rectMax.x, args.min.x, args.max.x), rectMax.y);
 
             if (clampedRectMax.x - clampedRectMin.x > 0) {
                 args.window->DrawList->AddRectFilled(clampedRectMin, clampedRectMax, IM_COL32(255, 255, 0, 255));
-            }
-            if (rectMin.x >= args.min.x && rectMax.x <= args.max.x) {
-                args.window->DrawList->AddText(ImVec2(centerXpos - (nameSize.x / 2), args.min.y), IM_COL32(0, 0, 0, 255), it->label.c_str());
+                args.window->DrawList->AddText(ImVec2(centerXpos - (nameSize.x / 2), targetY), IM_COL32(0, 0, 0, 255), it->label.c_str());
             }
 
             // make sure to get the next element in the spot list!
@@ -278,7 +313,16 @@ private:
                 // if so, update it
                 // if not, add it
                 if(!found) {
-                    waterfallSpots.push_back({commandParts[3], frequency, spotTime});
+                    WaterfallSpot spot = {commandParts[3], frequency, spotTime};
+                    waterfallSpots.insert(
+                        std::lower_bound(
+                            waterfallSpots.begin(),
+                            waterfallSpots.end(),
+                            spot.frequency,
+                            [](const WaterfallSpot &lhs, double f) { return lhs.frequency < f; }
+                        ),
+                        spot
+                    );
                 }
             }
 

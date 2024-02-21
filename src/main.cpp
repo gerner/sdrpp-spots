@@ -209,7 +209,7 @@ private:
             }
 
             if (it->frequency >= args.lowFreq && it->frequency <= args.highFreq) {
-                args.window->DrawList->AddLine(ImVec2(centerXpos, targetY), ImVec2(centerXpos, args.max.y), IM_COL32(255, 255, 0, 255));
+                args.window->DrawList->AddLine(ImVec2(centerXpos, targetY), ImVec2(centerXpos, args.max.y), _this->spotBgColor);
             }
 
             ImVec2 rectMin = ImVec2(centerXpos - (nameSize.x / 2) - 5, targetY);
@@ -218,8 +218,8 @@ private:
             ImVec2 clampedRectMax = ImVec2(std::clamp<double>(rectMax.x, args.min.x, args.max.x), rectMax.y);
 
             if (clampedRectMax.x - clampedRectMin.x > 0) {
-                args.window->DrawList->AddRectFilled(clampedRectMin, clampedRectMax, IM_COL32(255, 255, 0, 255));
-                args.window->DrawList->AddText(ImVec2(centerXpos - (nameSize.x / 2), targetY), IM_COL32(0, 0, 0, 255), it->label.c_str());
+                args.window->DrawList->AddRectFilled(clampedRectMin, clampedRectMax, _this->spotBgColor);
+                args.window->DrawList->AddText(ImVec2(centerXpos - (nameSize.x / 2), targetY), _this->spotTextColor, it->label.c_str());
             }
 
             // make sure to get the next element in the spot list!
@@ -245,20 +245,20 @@ private:
 
     static void clientHandler(net::Conn _client, void* ctx) {
         SpotsModule* _this = (SpotsModule*)ctx;
-        flog::info("New spot client!");
+        //flog::info("New spot client!");
 
         _this->client = std::move(_client);
         _this->client->readAsync(1024, _this->dataBuf, dataHandler, _this, false);
         _this->client->waitForEnd();
         _this->client->close();
 
-        flog::info("Spot client disconnected!");
+        //flog::info("Spot client disconnected!");
 
         _this->listener->acceptAsync(clientHandler, _this);
     }
 
     void commandHandler(std::string cmd) {
-        flog::info("spot command: {0}", cmd);
+        //flog::info("spot command: {0}", cmd);
 
         // command format: COMMAND [\t args...]
         // spot command: DX \t SPOTTER \t FREQ \t DX \t COMMENT \t TIME"
@@ -290,6 +290,13 @@ private:
             std::chrono::time_point<std::chrono::system_clock> spotTime;
             if(parseTime(commandParts[5], &spotTime) != 0) {
                 resp = "1 ERROR\n";
+                client->write(resp.size(), (uint8_t*)resp.c_str());
+                return;
+            }
+
+            if(spotTime < std::chrono::system_clock::now() - spotLifetime) {
+                // silently drop already expired spots
+                resp = "0 OK\n";
                 client->write(resp.size(), (uint8_t*)resp.c_str());
                 return;
             }
@@ -367,6 +374,8 @@ private:
     bool enabled = true;
 
     std::chrono::duration<int64_t> spotLifetime = std::chrono::minutes(30);
+    ImU32 spotBgColor = IM_COL32(0xCF, 0xFD, 0xBC ,255);
+    ImU32 spotTextColor = IM_COL32(0, 0, 0, 255);
 
     char hostname[1024];
     int port = 6214;

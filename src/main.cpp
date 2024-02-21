@@ -1,8 +1,10 @@
+#include <cstring>
 #include <iostream>
 #include <sstream>
 #include <vector>
 #include <list>
 #include <utils/networking.h>
+#include <utils/freq_formatting.h>
 #include <imgui.h>
 #include <module.h>
 #include <gui/gui.h>
@@ -99,10 +101,18 @@ int parseTime(const std::string &s, std::chrono::time_point<std::chrono::system_
     return 0;
 }
 
+// actual spots we're keeping track of
 struct WaterfallSpot {
     std::string label;
     double frequency;
     std::chrono::time_point<std::chrono::system_clock> spotTime;
+};
+
+// info about how we draw spots on the waterfall so we can figure out clicks
+struct WaterfallLabel {
+    WaterfallSpot* spot;
+    ImVec2 rectMin;
+    ImVec2 rectMax;
 };
 
 class SpotsModule : public ModuleManager::Instance {
@@ -115,14 +125,18 @@ public:
 
         fftRedrawHandler.ctx = this;
         fftRedrawHandler.handler = fftRedraw;
+        inputHandler.ctx = this;
+        inputHandler.handler = fftInput;
 
         gui::menu.registerEntry(name, menuHandler, this, NULL);
         gui::waterfall.onFFTRedraw.bindHandler(&fftRedrawHandler);
+        gui::waterfall.onInputProcess.bindHandler(&inputHandler);
     }
 
     ~SpotsModule() {
         gui::menu.removeEntry(name);
         gui::waterfall.onFFTRedraw.unbindHandler(&fftRedrawHandler);
+        gui::waterfall.onInputProcess.unbindHandler(&inputHandler);
 
         if (client) { client->close(); }
         if (listener) { listener->close(); }
@@ -161,6 +175,7 @@ private:
         std::vector<float> lanePositions;
         float laneHeight = ImGui::CalcTextSize("TEST").y + 2;
         int laneLimit = 8;
+        _this->waterfallLabels.clear();
         for (auto it = _this->waterfallSpots.begin(); it != _this->waterfallSpots.end();) {
 
             // handle expiration of spots
@@ -218,6 +233,7 @@ private:
             ImVec2 clampedRectMax = ImVec2(std::clamp<double>(rectMax.x, args.min.x, args.max.x), rectMax.y);
 
             if (clampedRectMax.x - clampedRectMin.x > 0) {
+                _this->waterfallLabels.push_back({&(*it), rectMin, rectMax});
                 args.window->DrawList->AddRectFilled(clampedRectMin, clampedRectMax, _this->spotBgColor);
                 args.window->DrawList->AddText(ImVec2(centerXpos - (nameSize.x / 2), targetY), _this->spotTextColor, it->label.c_str());
             }
@@ -225,6 +241,64 @@ private:
             // make sure to get the next element in the spot list!
             ++it;
         }
+    }
+
+    // stuff to check if we click on a label on the waterfall
+    // inspired by freuqency_manager module
+    bool mouseAlreadyDown = false;
+    bool mouseClickedInLabel = false;
+    static void fftInput(ImGui::WaterFall::InputHandlerArgs args, void* ctx) {
+        SpotsModule* _this = (SpotsModule*)ctx;
+        if (_this->mouseClickedInLabel) {
+            if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                _this->mouseClickedInLabel = false;
+            }
+            gui::waterfall.inputHandled = true;
+            return;
+        }
+
+        // First check that the mouse clicked outside of any label. Also get the bookmark that's hovered
+        bool inALabel = false;
+        WaterfallLabel hoveredLabel;
+
+        for(auto label : _this->waterfallLabels) {
+            ImVec2 clampedRectMin = ImVec2(std::clamp<double>(label.rectMin.x, args.fftRectMin.x, args.fftRectMax.x), label.rectMin.y);
+            ImVec2 clampedRectMax = ImVec2(std::clamp<double>(label.rectMax.x, args.fftRectMin.x, args.fftRectMax.x), label.rectMax.y);
+
+            if (ImGui::IsMouseHoveringRect(clampedRectMin, clampedRectMax)) {
+                inALabel = true;
+                hoveredLabel = label;
+                break;
+            }
+        }
+
+        // Check if mouse was already down
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !inALabel) {
+            _this->mouseAlreadyDown = true;
+        }
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            _this->mouseAlreadyDown = false;
+            _this->mouseClickedInLabel = false;
+        }
+
+        // If yes, cancel
+        if (_this->mouseAlreadyDown || !inALabel) { return; }
+
+        gui::waterfall.inputHandled = true;
+
+        ImVec2 clampedRectMin = ImVec2(std::clamp<double>(hoveredLabel.rectMin.x, args.fftRectMin.x, args.fftRectMax.x), hoveredLabel.rectMin.y);
+        ImVec2 clampedRectMax = ImVec2(std::clamp<double>(hoveredLabel.rectMax.x, args.fftRectMin.x, args.fftRectMax.x), hoveredLabel.rectMax.y);
+
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            _this->mouseClickedInLabel = true;
+            tuner::tune(tuner::TUNER_MODE_NORMAL, gui::waterfall.selectedVFO, hoveredLabel.spot->frequency);
+        }
+
+        ImGui::BeginTooltip();
+        ImGui::TextUnformatted(hoveredLabel.spot->label.c_str());
+        ImGui::Separator();
+        ImGui::Text("Frequency: %s", utils::formatFreq(hoveredLabel.spot->frequency).c_str());
+        ImGui::EndTooltip();
     }
 
     static void dataHandler(int count, uint8_t* data, void* ctx) {
@@ -386,8 +460,10 @@ private:
     std::string command = "";
 
     EventHandler<ImGui::WaterFall::FFTRedrawArgs> fftRedrawHandler;
+    EventHandler<ImGui::WaterFall::InputHandlerArgs> inputHandler;
 
     std::list<WaterfallSpot> waterfallSpots;
+    std::list<WaterfallLabel> waterfallLabels;
     std::mutex waterfallMutex;
 
     /*

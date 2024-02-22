@@ -72,7 +72,7 @@ while true; do
     if [[ "$src" == "pota" ]]; then
         curl -s "https://api.pota.app/spot" | jq -r '.[] | ["DX", .spotter, .frequency, .activator, .name+" "+.comments, (.spotTime+"Z" | fromdateiso8601 | strftime("%H%M %Y-%m-%d")), .locationDesc] | @tsv' | nc -N -w 5 $host $port > /dev/null
     elif [[ "$src" == "hamqth" ]]; then
-        curl 'https://www.hamqth.com/dxc_csv.php?limit=200&band=10m' | tr '^' '\t' | awk '{printf("DX\t%s\n", $0) }' | nc -N -w 5 $host $port > /dev/null
+        curl -s 'https://www.hamqth.com/dxc_csv.php?limit=200' | tr '^' '\t' | cut -f1-5,10 | awk '{printf("DX\t%s\n", $0) }' | nc -N -w 5 $host $port > /dev/null
     else
         echo "unknown source $src"
         printusage

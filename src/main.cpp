@@ -8,6 +8,10 @@
 #include <imgui.h>
 #include <module.h>
 #include <gui/gui.h>
+#include <gui/style.h>
+#include <core.h>
+#include <config.h>
+#define CONCAT(a, b) ((std::string(a) + b).c_str())
 
 #define MAX_COMMAND_LENGTH 8192
 
@@ -101,11 +105,32 @@ int parseTime(const std::string &s, std::chrono::time_point<std::chrono::system_
     return 0;
 }
 
+std::string format_duration(std::chrono::system_clock::duration duration) {
+    // 1:00
+    const size_t bufsize=128;
+    char buf[bufsize];
+    int64_t sec = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
+    if(sec < 0) {
+        strcpy(buf, "neg");
+    } else if(sec < 60) {
+        snprintf(buf, bufsize, "%ld sec", sec);
+    } else if(sec < 3600) {
+        snprintf(buf, bufsize, "%ld:%ld min", sec/60, sec%60);
+    } else if(sec < 24*3600) {
+        snprintf(buf, bufsize, "%ld:%ld hrs", sec/3600, sec%3600/60);
+    } else {
+        strcpy(buf, "days");
+    }
+    return std::string(buf);
+}
+
 // actual spots we're keeping track of
 struct WaterfallSpot {
     std::string label;
     double frequency;
     std::chrono::time_point<std::chrono::system_clock> spotTime;
+    std::string comment;
+    std::string location;
 };
 
 // info about how we draw spots on the waterfall so we can figure out clicks
@@ -115,13 +140,26 @@ struct WaterfallLabel {
     ImVec2 rectMax;
 };
 
+ConfigManager config;
+
 class SpotsModule : public ModuleManager::Instance {
 public:
     SpotsModule(std::string name) {
         this->name = name;
 
+        config.acquire();
+        if (!config.conf.contains(name)) {
+            config.conf[name]["host"] = "localhost";
+            config.conf[name]["port"] = 6214;
+            config.conf[name]["autoStart"] = false;
+        }
+
         //TODO: config initialization
-        strcpy(hostname, "localhost");
+        std::string hostname = config.conf[name]["host"];
+        strcpy(host, hostname.c_str());
+        port = config.conf[name]["port"];
+        autoStart = config.conf[name]["autoStart"];
+        config.release(true);
 
         fftRedrawHandler.ctx = this;
         fftRedrawHandler.handler = fftRedraw;
@@ -143,7 +181,16 @@ public:
     }
 
     void postInit() {
+        // If autostart is enabled, start the server
+        if (autoStart) { startServer(); }
+    }
+
+    void start() {
         startServer();
+    }
+
+    void stop() {
+        stopServer();
     }
 
     void enable() {
@@ -161,9 +208,52 @@ public:
 private:
     static void menuHandler(void* ctx) {
         SpotsModule* _this = (SpotsModule*)ctx;
-        ImGui::Text("Hello SDR++, my name is %s", _this->name.c_str());
+        float menuWidth = ImGui::GetContentRegionAvail().x;
+
         //TODO: config
-        //TODO: start/stop server
+        if (_this->running) { style::beginDisabled(); }
+        if (ImGui::InputText(CONCAT("##_spots_host_", _this->name), _this->host, 1023)) {
+            config.acquire();
+            config.conf[_this->name]["host"] = std::string(_this->host);
+            config.release(true);
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
+        if (ImGui::InputInt(CONCAT("##_spots_port_", _this->name), &_this->port, 0, 0)) {
+            config.acquire();
+            config.conf[_this->name]["port"] = _this->port;
+            config.release(true);
+        }
+        if (_this->running) { style::endDisabled(); }
+
+        if (ImGui::Checkbox(CONCAT("Listen on startup##_spots_auto_lst_", _this->name), &_this->autoStart)) {
+            config.acquire();
+            config.conf[_this->name]["autoStart"] = _this->autoStart;
+            config.release(true);
+        }
+
+        //start/stop server
+        ImGui::FillWidth();
+        if (_this->running && ImGui::Button(CONCAT("Stop##_spots_stop_", _this->name), ImVec2(menuWidth, 0))) {
+            _this->stop();
+        }
+        else if (!_this->running && ImGui::Button(CONCAT("Start##_spots_stop_", _this->name), ImVec2(menuWidth, 0))) {
+            _this->start();
+        }
+
+        ImGui::TextUnformatted("Status:");
+        ImGui::SameLine();
+
+        if(_this->running) {
+            auto sinceLastUpdate = std::chrono::system_clock::now() - _this->lastUpdate;
+            if(std::chrono::duration_cast<std::chrono::seconds>(sinceLastUpdate).count() > 12*3600) {
+                ImGui::TextColored(ImVec4(0.0, 1.0, 0.0, 1.0), "Waiting...");
+            } else {
+                ImGui::TextColored(ImVec4(0.0, 1.0, 0.0, 1.0), CONCAT(format_duration(sinceLastUpdate), " ago"));
+            }
+        } else {
+            ImGui::TextUnformatted("Idle");
+        }
     }
 
     static void fftRedraw(ImGui::WaterFall::FFTRedrawArgs args, void* ctx) {
@@ -298,6 +388,10 @@ private:
         ImGui::TextUnformatted(hoveredLabel.spot->label.c_str());
         ImGui::Separator();
         ImGui::Text("Frequency: %s", utils::formatFreq(hoveredLabel.spot->frequency).c_str());
+        std::string lastSpotted = format_duration(std::chrono::system_clock::now() - hoveredLabel.spot->spotTime) + " ago";
+        ImGui::Text("Last spotted: %s", lastSpotted.c_str());
+        ImGui::Text("Location: %s", hoveredLabel.spot->location.c_str());
+        ImGui::Text("Comment: %s", hoveredLabel.spot->comment.c_str());
         ImGui::EndTooltip();
     }
 
@@ -335,7 +429,7 @@ private:
         //flog::info("spot command: {0}", cmd);
 
         // command format: COMMAND [\t args...]
-        // spot command: DX \t SPOTTER \t FREQ \t DX \t COMMENT \t TIME"
+        // spot command: DX \t SPOTTER \t FREQ \t DX \t COMMENT \t TIME \t LOCATION"
         std::string resp;
         std::vector<std::string> commandParts = split(cmd, '\t');
         if(commandParts.size() == 0) {
@@ -345,7 +439,7 @@ private:
         }
 
         if("DX" == commandParts[0]) {
-            if(commandParts.size() < 6) {
+            if(commandParts.size() < 7) {
                 resp = "1 ERROR\n";
                 client->write(resp.size(), (uint8_t*)resp.c_str());
                 return;
@@ -368,6 +462,9 @@ private:
                 return;
             }
 
+            //everything is ok with input, we have a spot
+            lastUpdate = std::chrono::system_clock::now();
+
             if(spotTime < std::chrono::system_clock::now() - spotLifetime) {
                 // silently drop already expired spots
                 resp = "0 OK\n";
@@ -376,6 +473,8 @@ private:
             }
 
             std::string label = commandParts[3];
+            std::string comment = commandParts[4];
+            std::string location = commandParts[6];
 
             {
                 bool found = false;
@@ -387,6 +486,8 @@ private:
                         if(spotTime > spot.spotTime) {
                             spot.spotTime = spotTime;
                             spot.frequency = frequency;
+                            spot.comment = comment;
+                            spot.location = location;
                         }
                         break;
                     }
@@ -394,7 +495,13 @@ private:
                 // if so, update it
                 // if not, add it
                 if(!found) {
-                    WaterfallSpot spot = {commandParts[3], frequency, spotTime};
+                    WaterfallSpot spot = {
+                        commandParts[3],
+                        frequency,
+                        spotTime,
+                        comment,
+                        location
+                    };
                     waterfallSpots.insert(
                         std::lower_bound(
                             waterfallSpots.begin(),
@@ -413,9 +520,11 @@ private:
     }
 
     void startServer() {
+        if (running) { return; }
         try {
-            listener = net::listen(hostname, port);
+            listener = net::listen(host, port);
             listener->acceptAsync(clientHandler, this);
+            running = true;
         }
         catch (const std::exception& e) {
             flog::error("Could not start spot server: {}", e.what());
@@ -423,8 +532,10 @@ private:
     }
 
     void stopServer() {
+        if (!running) { return; }
         if (client) { client->close(); }
         listener->close();
+        running = false;
     }
 
     /*void worker() {
@@ -446,13 +557,16 @@ private:
 
     std::string name;
     bool enabled = true;
+    bool running = false;
+    std::chrono::time_point<std::chrono::system_clock> lastUpdate;
 
     std::chrono::duration<int64_t> spotLifetime = std::chrono::minutes(30);
     ImU32 spotBgColor = IM_COL32(0xCF, 0xFD, 0xBC ,255);
     ImU32 spotTextColor = IM_COL32(0, 0, 0, 255);
 
-    char hostname[1024];
+    char host[1024];
     int port = 6214;
+    bool autoStart = false;
     uint8_t dataBuf[1024];
     net::Listener listener;
     net::Conn client;
@@ -476,7 +590,9 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    // Nothing here
+    config.setPath(core::args["root"].s() + "/spots_config.json");
+    config.load(json::object());
+    config.enableAutoSave();
 }
 
 MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
@@ -488,5 +604,6 @@ MOD_EXPORT void _DELETE_INSTANCE_(void* instance) {
 }
 
 MOD_EXPORT void _END_() {
-    // Nothing here
+    config.disableAutoSave();
+    config.save();
 }

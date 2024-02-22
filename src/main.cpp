@@ -152,6 +152,8 @@ public:
             config.conf[name]["host"] = "localhost";
             config.conf[name]["port"] = 6214;
             config.conf[name]["autoStart"] = false;
+            config.conf[name]["spotLifetime"] = 30;
+            config.conf[name]["maxSpotLifetime"] = 240;
         }
 
         //TODO: config initialization
@@ -159,6 +161,8 @@ public:
         strcpy(host, hostname.c_str());
         port = config.conf[name]["port"];
         autoStart = config.conf[name]["autoStart"];
+        spotLifetime = config.conf[name]["spotLifetime"];
+        maxSpotLifetime = config.conf[name]["maxSpotLifetime"];
         config.release(true);
 
         fftRedrawHandler.ctx = this;
@@ -232,6 +236,20 @@ private:
             config.release(true);
         }
 
+        ImGui::LeftLabel("Spot Lifetime");
+        ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
+        if (ImGui::SliderInt(("##_spots_spotlifetime_" + _this->name).c_str(), &_this->spotLifetime, 1, _this->maxSpotLifetime)) {
+            config.acquire();
+            config.conf[_this->name]["spotLifetime"] = _this->spotLifetime;
+            config.release(true);
+        }
+
+        ImGui::FillWidth();
+        if(ImGui::Button(CONCAT("Clear spots##_spots_clear_", _this->name), ImVec2(menuWidth, 0))) {
+            std::lock_guard lk(_this->waterfallMutex);
+            _this->waterfallSpots.clear();
+        }
+
         //start/stop server
         ImGui::FillWidth();
         if (_this->running && ImGui::Button(CONCAT("Stop##_spots_stop_", _this->name), ImVec2(menuWidth, 0))) {
@@ -249,7 +267,8 @@ private:
             if(std::chrono::duration_cast<std::chrono::seconds>(sinceLastUpdate).count() > 12*3600) {
                 ImGui::TextColored(ImVec4(0.0, 1.0, 0.0, 1.0), "Waiting...");
             } else {
-                ImGui::TextColored(ImVec4(0.0, 1.0, 0.0, 1.0), CONCAT(format_duration(sinceLastUpdate), " ago"));
+                std::string lastDataLabel = format_duration(sinceLastUpdate);
+                ImGui::TextColored(ImVec4(0.0, 1.0, 0.0, 1.0), "%s ago", lastDataLabel.c_str());
             }
         } else {
             ImGui::TextUnformatted("Idle");
@@ -260,7 +279,8 @@ private:
         SpotsModule* _this = (SpotsModule*)ctx;
 
         std::lock_guard lk(_this->waterfallMutex);
-        auto expirationTime = std::chrono::system_clock::now() - _this->spotLifetime;
+        auto expirationTime = std::chrono::system_clock::now() - std::chrono::minutes(_this->maxSpotLifetime);
+        auto displayTime = std::chrono::system_clock::now() - std::chrono::minutes(_this->spotLifetime);
 
         std::vector<float> lanePositions;
         float laneHeight = ImGui::CalcTextSize("TEST").y + 2;
@@ -269,12 +289,13 @@ private:
         for (auto it = _this->waterfallSpots.begin(); it != _this->waterfallSpots.end();) {
 
             // handle expiration of spots
-            if(it->spotTime < expirationTime) {
-                //flog::info("{0} expired {1} < {2}", it->label, std::chrono::system_clock::to_time_t(it->spotTime), std::chrono::system_clock::to_time_t(expirationTime));
-                it = _this->waterfallSpots.erase(it);
+            if(it->spotTime < displayTime) {
+                if(it->spotTime < expirationTime) {
+                    it = _this->waterfallSpots.erase(it);
+                } else {
+                    ++it;
+                }
                 continue;
-            //} else {
-                //flog::info("{0} not expired {1} < {2}", it->label, std::chrono::system_clock::to_time_t(it->spotTime), std::chrono::system_clock::to_time_t(expirationTime));
             }
 
             // skip spots outside waterfall frequency range
@@ -465,7 +486,7 @@ private:
             //everything is ok with input, we have a spot
             lastUpdate = std::chrono::system_clock::now();
 
-            if(spotTime < std::chrono::system_clock::now() - spotLifetime) {
+            if(spotTime < std::chrono::system_clock::now() - std::chrono::minutes(maxSpotLifetime)) {
                 // silently drop already expired spots
                 resp = "0 OK\n";
                 client->write(resp.size(), (uint8_t*)resp.c_str());
@@ -538,29 +559,13 @@ private:
         running = false;
     }
 
-    /*void worker() {
-        // a comment in discord_integration claims SDR++ author is working on a
-        // timer which we should probably be using
-        while (workerRunning) {
-            std::unique_lock cv_lk(m);
-            cv.wait_for(cv_lk, 10000ms);
-            if(!workerRunning) {
-                return;
-            }
-
-            // expire spots
-            {
-                std::lock_guard lk(waterfallMutex);
-            }
-        }
-    }*/
-
     std::string name;
     bool enabled = true;
     bool running = false;
     std::chrono::time_point<std::chrono::system_clock> lastUpdate;
 
-    std::chrono::duration<int64_t> spotLifetime = std::chrono::minutes(30);
+    int spotLifetime = 30; // don't display stuff older than this in minutes
+    int maxSpotLifetime = 240; // drop spots older than this in minutes
     ImU32 spotBgColor = IM_COL32(0xCF, 0xFD, 0xBC ,255);
     ImU32 spotTextColor = IM_COL32(0, 0, 0, 255);
 
@@ -579,14 +584,6 @@ private:
     std::list<WaterfallSpot> waterfallSpots;
     std::list<WaterfallLabel> waterfallLabels;
     std::mutex waterfallMutex;
-
-    /*
-    // Threading
-    std::thread workerThread;
-    bool workerRunning;
-    std::condition_variable cv;
-    std::mutex m;
-    */
 };
 
 MOD_EXPORT void _INIT_() {

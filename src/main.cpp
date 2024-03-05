@@ -1,6 +1,7 @@
 #include <cstring>
 #include <iostream>
 #include <sstream>
+#include <algorithm>
 #include <vector>
 #include <list>
 #include <utils/networking.h>
@@ -498,41 +499,42 @@ private:
             std::string location = commandParts[6];
 
             {
-                bool found = false;
                 std::lock_guard lk(waterfallMutex);
-                // see if we already have a corresponding spot
-                for(auto spot : waterfallSpots) {
-                    if(spot.label == label) {
-                        found = true;
-                        if(spotTime > spot.spotTime) {
-                            spot.spotTime = spotTime;
-                            spot.frequency = frequency;
-                            spot.comment = comment;
-                            spot.location = location;
-                        }
-                        break;
+
+                // the spot we'll insert into the list, even if it already
+                // exists
+                WaterfallSpot spot = {
+                    label,
+                    frequency,
+                    spotTime,
+                    comment,
+                    location
+                };
+
+                // find a spot with a matching label (callsign)
+                // we'll re-add it to the list in case the frequency changed
+                // so waterfallSpots always stays in frequency order
+                auto it = std::find_if(
+                        waterfallSpots.begin(),
+                        waterfallSpots.end(),
+                        [&label](const WaterfallSpot& s) { return s.label == label; }
+                );
+                if (it != waterfallSpots.end()) {
+                    if(it->spotTime > spotTime) {
+                        // more recent spot takes precedence
+                        spot = *it;
                     }
+                    waterfallSpots.erase(it);
                 }
-                // if so, update it
-                // if not, add it
-                if(!found) {
-                    WaterfallSpot spot = {
-                        commandParts[3],
-                        frequency,
-                        spotTime,
-                        comment,
-                        location
-                    };
-                    waterfallSpots.insert(
-                        std::lower_bound(
-                            waterfallSpots.begin(),
-                            waterfallSpots.end(),
-                            spot.frequency,
-                            [](const WaterfallSpot &lhs, double f) { return lhs.frequency < f; }
-                        ),
-                        spot
-                    );
-                }
+                waterfallSpots.insert(
+                    std::lower_bound(
+                        waterfallSpots.begin(),
+                        waterfallSpots.end(),
+                        spot.frequency,
+                        [](const WaterfallSpot &lhs, double f) { return lhs.frequency < f; }
+                    ),
+                    spot
+                );
             }
 
             resp = "0 OK\n";

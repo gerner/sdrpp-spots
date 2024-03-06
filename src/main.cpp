@@ -6,6 +6,7 @@
 #include <list>
 #include <utils/networking.h>
 #include <utils/freq_formatting.h>
+#include <signal_path/signal_path.h>
 #include <imgui.h>
 #include <module.h>
 #include <gui/gui.h>
@@ -23,6 +24,10 @@ SDRPP_MOD_INFO{
     /* Version:         */ 0, 1, 0,
     /* Max instances    */ -1
 };
+
+bool almost_equal(double a, double b, double epsilon=1e-3) {
+    return abs(a-b) < epsilon;
+}
 
 /**********************************************
  * Two main functionalities:
@@ -287,6 +292,9 @@ private:
         float laneHeight = ImGui::CalcTextSize("TEST").y + 2;
         int laneLimit = 8;
         _this->waterfallLabels.clear();
+        flog::info("fftRedraw");
+        double waterfallFreq = gui::waterfall.getCenterFrequency();
+        waterfallFreq += sigpath::vfoManager.getOffset(gui::waterfall.selectedVFO);
         for (auto it = _this->waterfallSpots.begin(); it != _this->waterfallSpots.end();) {
 
             // handle expiration of spots
@@ -335,8 +343,16 @@ private:
                 }
             }
 
+            ImU32 bgColor = _this->spotBgColor;
+            if (almost_equal(waterfallFreq, it->frequency)) {
+                flog::info("{0} is almost equal to {1}", waterfallFreq, it->frequency);
+                bgColor = _this->spotBgColorSelected;
+            } else {
+                flog::info("{0} is not almost equal to {1}", waterfallFreq, it->frequency);
+            }
+
             if (it->frequency >= args.lowFreq && it->frequency <= args.highFreq) {
-                args.window->DrawList->AddLine(ImVec2(centerXpos, targetY), ImVec2(centerXpos, args.max.y), _this->spotBgColor);
+                args.window->DrawList->AddLine(ImVec2(centerXpos, targetY), ImVec2(centerXpos, args.max.y), bgColor);
             }
 
             ImVec2 rectMin = ImVec2(centerXpos - (nameSize.x / 2) - 5, targetY);
@@ -346,7 +362,7 @@ private:
 
             if (clampedRectMax.x - clampedRectMin.x > 0) {
                 _this->waterfallLabels.push_back({&(*it), rectMin, rectMax});
-                args.window->DrawList->AddRectFilled(clampedRectMin, clampedRectMax, _this->spotBgColor);
+                args.window->DrawList->AddRectFilled(clampedRectMin, clampedRectMax, bgColor);
                 args.window->DrawList->AddText(ImVec2(centerXpos - (nameSize.x / 2), targetY), _this->spotTextColor, it->label.c_str());
             }
 
@@ -569,6 +585,7 @@ private:
     int spotLifetime = 30; // don't display stuff older than this in minutes
     int maxSpotLifetime = 240; // drop spots older than this in minutes
     ImU32 spotBgColor = IM_COL32(0xCF, 0xFD, 0xBC ,255);
+    ImU32 spotBgColorSelected = IM_COL32(0xFB, 0xAF, 0x00, 255);
     ImU32 spotTextColor = IM_COL32(0, 0, 0, 255);
 
     char host[1024];

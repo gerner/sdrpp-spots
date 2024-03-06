@@ -345,10 +345,7 @@ private:
 
             ImU32 bgColor = _this->spotBgColor;
             if (almost_equal(waterfallFreq, it->frequency)) {
-                flog::info("{0} is almost equal to {1}", waterfallFreq, it->frequency);
                 bgColor = _this->spotBgColorSelected;
-            } else {
-                flog::info("{0} is not almost equal to {1}", waterfallFreq, it->frequency);
             }
 
             if (it->frequency >= args.lowFreq && it->frequency <= args.highFreq) {

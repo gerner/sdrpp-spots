@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <vector>
 #include <list>
-#include <utils/networking.h>
 #include <utils/freq_formatting.h>
 #include <signal_path/signal_path.h>
 #include <imgui.h>
@@ -13,9 +12,11 @@
 #include <gui/style.h>
 #include <core.h>
 #include <config.h>
+#include "main.h"
+#include "sources/hamqth.h"
+#include "sources/pota.h"
+//#include "sources/server.h"
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
-
-#define MAX_COMMAND_LENGTH 8192
 
 SDRPP_MOD_INFO{
     /* Name:            */ "sdrpp-spots",
@@ -38,79 +39,6 @@ bool almost_equal(double a, double b, double epsilon=1e-3) {
  * 2. draw spots: place on waterfall, similar to frequency_manager
  **********************************************/
 
-std::vector<std::string> split(const std::string &s, char delim) {
-    std::vector<std::string> result;
-    std::stringstream ss (s);
-    std::string item;
-
-    while (getline (ss, item, delim)) {
-        result.push_back (item);
-    }
-
-    return result;
-}
-
-int parseTime(const std::string &s, std::chrono::time_point<std::chrono::system_clock>* t) {
-    std::tm tm{};
-    // HHMM YYYY-mm-dd
-    size_t loc = s.find(" ");
-    if(loc == s.npos || loc+1 >= s.size()) {
-        return 1;
-    }
-    std::string timeS = s.substr(0, loc);
-    int time = std::stoi(timeS);
-    if(time < 0) {
-        return 1;
-    }
-    tm.tm_sec = 0;
-    tm.tm_min = time % 100;
-    if(tm.tm_min >= 60) {
-        return 1;
-    }
-    tm.tm_hour = time / 100;
-    if(tm.tm_hour >= 24) {
-        return 1;
-    }
-
-    std::string dateS = s.substr(loc+1);
-    loc = dateS.find("-");
-    if(loc == s.npos || loc+1 >= dateS.size()) {
-        return 1;
-    }
-    std::string yearS = dateS.substr(0, loc);
-    int year = std::stoi(yearS);
-    if(year < 0) {
-        return 1;
-    }
-    dateS = dateS.substr(loc+1);
-    loc = dateS.find("-");
-    if(loc == s.npos || loc+1 >= dateS.size()) {
-        return 1;
-    }
-    std::string monthS = dateS.substr(0, loc);
-    int month = std::stoi(monthS);
-    if(month < 1 || month > 12) {
-        return 1;
-    }
-    std::string dayS = dateS.substr(loc+1);
-    int day = std::stoi(dayS);
-    if(day < 1 || day > 31) {
-        return 1;
-    }
-
-    tm.tm_year = year - 1900;
-    tm.tm_mon = month-1; // Jan = 0
-    tm.tm_mday = day;
-    tm.tm_isdst = 0;
-
-    // from https://stackoverflow.com/a/38298359
-    std::time_t tLocal = std::mktime(&tm);
-    time_t tUTC = tLocal + (std::mktime(std::localtime(&tLocal)) - std::mktime(std::gmtime(&tLocal)));
-    *t = std::chrono::system_clock::from_time_t(tUTC);
-
-    return 0;
-}
-
 std::string format_duration(std::chrono::system_clock::duration duration) {
     // 1:00
     const size_t bufsize=128;
@@ -130,15 +58,28 @@ std::string format_duration(std::chrono::system_clock::duration duration) {
     return std::string(buf);
 }
 
-// actual spots we're keeping track of
-struct WaterfallSpot {
-    std::string label;
-    double frequency;
-    std::chrono::time_point<std::chrono::system_clock> spotTime;
-    std::string comment;
-    std::string location;
+struct SpotSource {
+    SpotSource(std::string n, bool e, ImU32 c) : name(n), enabled(e), color(c) {}
+    SpotSource(std::string n, bool e, ImU32 c, std::unique_ptr<SpotProvider> p, AddSpot a, void* ctx) : name(n), enabled(e), color(c), provider(std::move(p)) {
+        provider->registerAddSpot(a, this, ctx);
+    }
+    SpotSource(SpotSource&& rhs) : name(rhs.name), enabled(rhs.enabled), color(rhs.color), provider(std::move(rhs.provider)) {
+        // need to re-register as this since the old this is gone
+        provider->registerAddSpot(this);
+    }
+
+    std::string name;
+    bool enabled;
+    ImU32 color;
+    std::unique_ptr<SpotProvider> provider;
 };
 
+struct WaterfallSpot {
+    Spot spot;
+    SpotSource* source;
+};
+
+// actual spots we're keeping track of
 // info about how we draw spots on the waterfall so we can figure out clicks
 struct WaterfallLabel {
     WaterfallSpot* spot;
@@ -185,22 +126,32 @@ public:
         gui::menu.removeEntry(name);
         gui::waterfall.onFFTRedraw.unbindHandler(&fftRedrawHandler);
         gui::waterfall.onInputProcess.unbindHandler(&inputHandler);
-
-        if (client) { client->close(); }
-        if (listener) { listener->close(); }
     }
 
     void postInit() {
-        // If autostart is enabled, start the server
-        if (autoStart) { startServer(); }
+        spotSources.emplace_back("HamQTH ClusterDX", false, spotBgColor, std::make_unique<HamQTHProvider>(), &SpotsModule::addSpot, this);
+        spotSources.emplace_back("POTA.app spots", false, spotBgColor, std::make_unique<POTAProvider>(), &SpotsModule::addSpot, this);
+        //spotSources.emplace_back("Server spots", false, spotBgColor, std::make_unique<ServerProvider>(host, port), &SpotsModule::addSpot, this);
     }
 
     void start() {
-        startServer();
+        if (running) { return; }
+        for (auto& source : spotSources) {
+            if (source.enabled) {
+                flog::info("starting provider {0}", source.name);
+                source.provider->start();
+            }
+        }
+        running = true;
     }
 
     void stop() {
-        stopServer();
+        if (!running) { return; }
+        for (auto& source : spotSources) {
+            flog::info("stopping provider {0}", source.name);
+            source.provider->stop();
+        }
+        running = false;
     }
 
     void enable() {
@@ -220,8 +171,7 @@ private:
         SpotsModule* _this = (SpotsModule*)ctx;
         float menuWidth = ImGui::GetContentRegionAvail().x;
 
-        //TODO: config
-        if (_this->running) { style::beginDisabled(); }
+        /*if (_this->running) { style::beginDisabled(); }
         if (ImGui::InputText(CONCAT("##_spots_host_", _this->name), _this->host, 1023)) {
             config.acquire();
             config.conf[_this->name]["host"] = std::string(_this->host);
@@ -234,7 +184,7 @@ private:
             config.conf[_this->name]["port"] = _this->port;
             config.release(true);
         }
-        if (_this->running) { style::endDisabled(); }
+        if (_this->running) { style::endDisabled(); }*/
 
         if (ImGui::Checkbox(CONCAT("Listen on startup##_spots_auto_lst_", _this->name), &_this->autoStart)) {
             config.acquire();
@@ -248,6 +198,42 @@ private:
             config.acquire();
             config.conf[_this->name]["spotLifetime"] = _this->spotLifetime;
             config.release(true);
+        }
+
+        // compute enable button size
+        ImVec2 cellpad = ImGui::GetStyle().CellPadding;
+        float lheight = ImGui::GetTextLineHeight();
+        float cellWidth = lheight;// - (2.0f * cellpad.y);
+
+        if (ImGui::BeginTable("Spots Source Table", 3)) {
+            ImGui::TableSetupColumn("Source");
+            ImGui::TableSetupColumn("Color");
+            ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, cellWidth + cellpad.x);
+            ImGui::TableSetupScrollFreeze(3, 1);
+            ImGui::TableHeadersRow();
+
+            for(auto& source : _this->spotSources) {
+                ImGui::TableNextRow();
+
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextUnformatted(source.name.c_str());
+
+                ImGui::TableSetColumnIndex(1);
+                ImVec4 color = ImGui::ColorConvertU32ToFloat4(source.color);
+                if (ImGui::ColorEdit4(CONCAT("Color##_spots_color_", source.name + _this->name), (float*)&color, ImGuiColorEditFlags_NoInputs)) {
+                    source.color = ImGui::ColorConvertFloat4ToU32(color);
+                }
+
+                ImGui::TableSetColumnIndex(2);
+                if(ImGui::Checkbox(CONCAT("##_spots_", source.name + _this->name), &(source.enabled))) {
+                    if (source.enabled && _this->running) {
+                        source.provider->start();
+                    } else {
+                        source.provider->stop();
+                    }
+                }
+            }
+            ImGui::EndTable();
         }
 
         ImGui::FillWidth();
@@ -269,13 +255,7 @@ private:
         ImGui::SameLine();
 
         if(_this->running) {
-            auto sinceLastUpdate = std::chrono::system_clock::now() - _this->lastUpdate;
-            if(std::chrono::duration_cast<std::chrono::seconds>(sinceLastUpdate).count() > 12*3600) {
-                ImGui::TextColored(ImVec4(0.0, 1.0, 0.0, 1.0), "Waiting...");
-            } else {
-                std::string lastDataLabel = format_duration(sinceLastUpdate);
-                ImGui::TextColored(ImVec4(0.0, 1.0, 0.0, 1.0), "%s ago", lastDataLabel.c_str());
-            }
+            ImGui::TextColored(ImVec4(0.0, 1.0, 0.0, 1.0), "Running");
         } else {
             ImGui::TextUnformatted("Idle");
         }
@@ -292,14 +272,13 @@ private:
         float laneHeight = ImGui::CalcTextSize("TEST").y + 2;
         int laneLimit = 8;
         _this->waterfallLabels.clear();
-        flog::info("fftRedraw");
         double waterfallFreq = gui::waterfall.getCenterFrequency();
         waterfallFreq += sigpath::vfoManager.getOffset(gui::waterfall.selectedVFO);
         for (auto it = _this->waterfallSpots.begin(); it != _this->waterfallSpots.end();) {
 
             // handle expiration of spots
-            if(it->spotTime < displayTime) {
-                if(it->spotTime < expirationTime) {
+            if(it->spot.spotTime < displayTime) {
+                if(it->spot.spotTime < expirationTime) {
                     it = _this->waterfallSpots.erase(it);
                 } else {
                     ++it;
@@ -308,14 +287,14 @@ private:
             }
 
             // skip spots outside waterfall frequency range
-            if (it->frequency < args.lowFreq && it->frequency < args.highFreq) {
+            if (it->spot.frequency < args.lowFreq && it->spot.frequency < args.highFreq) {
                 ++it;
                 continue;
             }
 
-            double centerXpos = args.min.x + std::round((it->frequency - args.lowFreq) * args.freqToPixelRatio);
+            double centerXpos = args.min.x + std::round((it->spot.frequency - args.lowFreq) * args.freqToPixelRatio);
 
-            ImVec2 nameSize = ImGui::CalcTextSize(it->label.c_str());
+            ImVec2 nameSize = ImGui::CalcTextSize(it->spot.label.c_str());
             float leftEdge = centerXpos - (nameSize.x/2) - 5;
             float rightEdge = centerXpos + (nameSize.x/2) + 5;
 
@@ -343,12 +322,12 @@ private:
                 }
             }
 
-            ImU32 bgColor = _this->spotBgColor;
-            if (almost_equal(waterfallFreq, it->frequency)) {
+            ImU32 bgColor = it->source->color;//_this->spotBgColor;
+            /*if (almost_equal(waterfallFreq, it->spot.frequency)) {
                 bgColor = _this->spotBgColorSelected;
-            }
+            }*/
 
-            if (it->frequency >= args.lowFreq && it->frequency <= args.highFreq) {
+            if (it->spot.frequency >= args.lowFreq && it->spot.frequency <= args.highFreq) {
                 args.window->DrawList->AddLine(ImVec2(centerXpos, targetY), ImVec2(centerXpos, args.max.y), bgColor);
             }
 
@@ -360,7 +339,10 @@ private:
             if (clampedRectMax.x - clampedRectMin.x > 0) {
                 _this->waterfallLabels.push_back({&(*it), rectMin, rectMax});
                 args.window->DrawList->AddRectFilled(clampedRectMin, clampedRectMax, bgColor);
-                args.window->DrawList->AddText(ImVec2(centerXpos - (nameSize.x / 2), targetY), _this->spotTextColor, it->label.c_str());
+                /*if (almost_equal(waterfallFreq, it->spot.frequency)) {
+                    args.window->DrawList->AddRect(clampedRectMin, clampedRectMax, _this->spotBgColorSelected);
+                }*/
+                args.window->DrawList->AddText(ImVec2(centerXpos - (nameSize.x / 2), targetY), _this->spotTextColor, it->spot.label.c_str());
             }
 
             // make sure to get the next element in the spot list!
@@ -416,168 +398,62 @@ private:
 
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             _this->mouseClickedInLabel = true;
-            tuner::tune(tuner::TUNER_MODE_NORMAL, gui::waterfall.selectedVFO, hoveredLabel.spot->frequency);
+            tuner::tune(tuner::TUNER_MODE_NORMAL, gui::waterfall.selectedVFO, hoveredLabel.spot->spot.frequency);
         }
 
         ImGui::BeginTooltip();
-        ImGui::TextUnformatted(hoveredLabel.spot->label.c_str());
+        ImGui::TextUnformatted(hoveredLabel.spot->spot.label.c_str());
         ImGui::Separator();
-        ImGui::Text("Frequency: %s", utils::formatFreq(hoveredLabel.spot->frequency).c_str());
-        std::string lastSpotted = format_duration(std::chrono::system_clock::now() - hoveredLabel.spot->spotTime) + " ago";
+        ImGui::Text("Frequency: %s", utils::formatFreq(hoveredLabel.spot->spot.frequency).c_str());
+        std::string lastSpotted = format_duration(std::chrono::system_clock::now() - hoveredLabel.spot->spot.spotTime) + " ago";
         ImGui::Text("Last spotted: %s", lastSpotted.c_str());
-        ImGui::Text("Location: %s", hoveredLabel.spot->location.c_str());
-        ImGui::Text("Comment: %s", hoveredLabel.spot->comment.c_str());
+        ImGui::Text("Location: %s", hoveredLabel.spot->spot.location.c_str());
+        ImGui::Text("Comment: %s", hoveredLabel.spot->spot.comment.c_str());
         ImGui::EndTooltip();
     }
 
-    static void dataHandler(int count, uint8_t* data, void* ctx) {
-        SpotsModule* _this = (SpotsModule*)ctx;
+    static void addSpot(Spot providedSpot, void* sourceCtx, void* ctx) {
+        SpotSource* source = (SpotSource*) sourceCtx;
+        SpotsModule* _this = (SpotsModule*) ctx;
+        std::lock_guard lk(_this->waterfallMutex);
 
-        // read up to newline
-        for (int i = 0; i < count; i++) {
-            if (data[i] == '\n') {
-                _this->commandHandler(_this->command);
-                _this->command.clear();
-                continue;
-            }
-            if (_this->command.size() < MAX_COMMAND_LENGTH) { _this->command += (char)data[i]; }
-        }
-
-        _this->client->readAsync(1024, _this->dataBuf, dataHandler, _this, false);
-    }
-
-    static void clientHandler(net::Conn _client, void* ctx) {
-        SpotsModule* _this = (SpotsModule*)ctx;
-        //flog::info("New spot client!");
-
-        _this->client = std::move(_client);
-        _this->client->readAsync(1024, _this->dataBuf, dataHandler, _this, false);
-        _this->client->waitForEnd();
-        _this->client->close();
-
-        //flog::info("Spot client disconnected!");
-
-        _this->listener->acceptAsync(clientHandler, _this);
-    }
-
-    void commandHandler(std::string cmd) {
-        //flog::info("spot command: {0}", cmd);
-
-        // command format: COMMAND [\t args...]
-        // spot command: DX \t SPOTTER \t FREQ \t DX \t COMMENT \t TIME \t LOCATION"
-        std::string resp;
-        std::vector<std::string> commandParts = split(cmd, '\t');
-        if(commandParts.size() == 0) {
-            resp = "1 ERROR\n";
-            client->write(resp.size(), (uint8_t*)resp.c_str());
+        if(providedSpot.spotTime < std::chrono::system_clock::now() - std::chrono::minutes(_this->maxSpotLifetime)) {
+            // silently drop already expired spots
             return;
         }
-
-        if("DX" == commandParts[0]) {
-            if(commandParts.size() < 7) {
-                resp = "1 ERROR\n";
-                client->write(resp.size(), (uint8_t*)resp.c_str());
-                return;
+        WaterfallSpot spot = {providedSpot, source};
+        // find a spot with a matching label (callsign)
+        // we'll re-add it to the list in case the frequency changed
+        // so waterfallSpots always stays in frequency order
+        auto it = std::find_if(
+                _this->waterfallSpots.begin(),
+                _this->waterfallSpots.end(),
+                [&spot](const WaterfallSpot& s) { return s.spot.label == spot.spot.label; }
+        );
+        if (it != _this->waterfallSpots.end()) {
+            if(it->spot.spotTime > spot.spot.spotTime) {
+                // more recent spot takes precedence
+                spot = *it;
             }
-
-            // frequency comes in kHz
-            double frequency = std::stod(commandParts[2]);
-            if(frequency <= 0) {
-                resp = "1 ERROR\n";
-                client->write(resp.size(), (uint8_t*)resp.c_str());
-                return;
-            }
-            frequency *= 1000;
-
-            // time is HHMM YYYY-MM-DD
-            std::chrono::time_point<std::chrono::system_clock> spotTime;
-            if(parseTime(commandParts[5], &spotTime) != 0) {
-                resp = "1 ERROR\n";
-                client->write(resp.size(), (uint8_t*)resp.c_str());
-                return;
-            }
-
-            //everything is ok with input, we have a spot
-            lastUpdate = std::chrono::system_clock::now();
-
-            if(spotTime < std::chrono::system_clock::now() - std::chrono::minutes(maxSpotLifetime)) {
-                // silently drop already expired spots
-                resp = "0 OK\n";
-                client->write(resp.size(), (uint8_t*)resp.c_str());
-                return;
-            }
-
-            std::string label = commandParts[3];
-            std::string comment = commandParts[4];
-            std::string location = commandParts[6];
-
-            {
-                std::lock_guard lk(waterfallMutex);
-
-                // the spot we'll insert into the list, even if it already
-                // exists
-                WaterfallSpot spot = {
-                    label,
-                    frequency,
-                    spotTime,
-                    comment,
-                    location
-                };
-
-                // find a spot with a matching label (callsign)
-                // we'll re-add it to the list in case the frequency changed
-                // so waterfallSpots always stays in frequency order
-                auto it = std::find_if(
-                        waterfallSpots.begin(),
-                        waterfallSpots.end(),
-                        [&label](const WaterfallSpot& s) { return s.label == label; }
-                );
-                if (it != waterfallSpots.end()) {
-                    if(it->spotTime > spotTime) {
-                        // more recent spot takes precedence
-                        spot = *it;
-                    }
-                    waterfallSpots.erase(it);
-                }
-                waterfallSpots.insert(
-                    std::lower_bound(
-                        waterfallSpots.begin(),
-                        waterfallSpots.end(),
-                        spot.frequency,
-                        [](const WaterfallSpot &lhs, double f) { return lhs.frequency < f; }
-                    ),
-                    spot
-                );
-            }
-
-            resp = "0 OK\n";
-            client->write(resp.size(), (uint8_t*)resp.c_str());
+            _this->waterfallSpots.erase(it);
         }
+        _this->waterfallSpots.insert(
+            std::lower_bound(
+                _this->waterfallSpots.begin(),
+                _this->waterfallSpots.end(),
+                spot.spot.frequency,
+                [](const WaterfallSpot &lhs, double f) { return lhs.spot.frequency < f; }
+            ),
+            spot
+        );
     }
 
-    void startServer() {
-        if (running) { return; }
-        try {
-            listener = net::listen(host, port);
-            listener->acceptAsync(clientHandler, this);
-            running = true;
-        }
-        catch (const std::exception& e) {
-            flog::error("Could not start spot server: {}", e.what());
-        }
-    }
-
-    void stopServer() {
-        if (!running) { return; }
-        if (client) { client->close(); }
-        listener->close();
-        running = false;
-    }
+    char host[1024];
+    int port = 6214;
 
     std::string name;
     bool enabled = true;
     bool running = false;
-    std::chrono::time_point<std::chrono::system_clock> lastUpdate;
 
     int spotLifetime = 30; // don't display stuff older than this in minutes
     int maxSpotLifetime = 240; // drop spots older than this in minutes
@@ -585,17 +461,12 @@ private:
     ImU32 spotBgColorSelected = IM_COL32(0xFB, 0xAF, 0x00, 255);
     ImU32 spotTextColor = IM_COL32(0, 0, 0, 255);
 
-    char host[1024];
-    int port = 6214;
     bool autoStart = false;
-    uint8_t dataBuf[1024];
-    net::Listener listener;
-    net::Conn client;
-
-    std::string command = "";
 
     EventHandler<ImGui::WaterFall::FFTRedrawArgs> fftRedrawHandler;
     EventHandler<ImGui::WaterFall::InputHandlerArgs> inputHandler;
+
+    std::vector<SpotSource> spotSources;
 
     std::list<WaterfallSpot> waterfallSpots;
     std::list<WaterfallLabel> waterfallLabels;

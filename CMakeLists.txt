@@ -5,6 +5,11 @@ file(GLOB SRC "src/*.cpp")
 
 include(${SDRPP_MODULE_CMAKE})
 
+include(FindPkgConfig)
+pkg_check_modules(CURL libcurl REQUIRED)
+include_directories(SYSTEM ${CURL_INCLUDE_DIRS})
+target_link_libraries(${PROJECT_NAME} PRIVATE ${CURL_LIBRARIES})
+
 #add_library(${PROJECT_NAME} SHARED ${SRC})
 #target_link_libraries(${PROJECT_NAME} PRIVATE sdrpp_core)
 #set_target_properties(${PROJECT_NAME} PROPERTIES PREFIX "")

@@ -224,11 +224,11 @@ private:
                 ImGui::TableNextRow();
 
                 ImGui::TableSetColumnIndex(0);
-                ImGui::TextUnformatted(source.name.c_str());
+                ImGui::TextUnformatted(source.label.c_str());
 
                 ImGui::TableSetColumnIndex(1);
                 ImVec4 color = ImGui::ColorConvertU32ToFloat4(source.color);
-                if (ImGui::ColorEdit4(CONCAT("Color##_spots_color_", source.name + _this->name), (float*)&color, ImGuiColorEditFlags_NoInputs)) {
+                if (ImGui::ColorEdit4(CONCAT("##_spots_color_", source.name + _this->name), (float*)&color, ImGuiColorEditFlags_NoInputs)) {
                     source.color = ImGui::ColorConvertFloat4ToU32(color);
                     config.acquire();
                     config.conf[_this->name]["sources"][source.name]["enabled"] = source.color;

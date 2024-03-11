@@ -1,6 +1,14 @@
 # SDR++ Spots Module
 
+![SDR++ Spots Screeshot showing lots of labels on the waterfall](spots_screenshot.png)
+
 Adds spots to the waterfall display in [SDR++](https://github.com/AlexandreRouma/SDRPlusPlus).
+
+Sources of spots:
+ * ClusterDX network from [HamQTH](https://hamqth.com) API
+ * [POTA.app](https://pota.app) spots
+ * [SOTAWatch](https://sotawatch.sota.org.uk/en/) spots
+ * [World Wide Flora and Fauna in amateur radio](https://wwff.co/) spots
 
 # Building
 

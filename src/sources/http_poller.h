@@ -65,7 +65,7 @@ private:
 
             if (res != CURLE_OK) {
                 curl_easy_cleanup(curl);
-                flog::error("error reaching making request");
+                flog::error("error making request {0}", url);
                 break;
             }
             curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &responseCode);

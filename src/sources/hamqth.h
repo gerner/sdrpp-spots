@@ -6,7 +6,7 @@
 class HamQTHProvider : public HTTPPoller {
 public:
     HamQTHProvider() {
-        strcpy(url, "https://www.hamqth.com//dxc_csv.php?limit=200");
+        strcpy(url, "https://www.hamqth.com/dxc_csv.php?limit=200");
     }
 
 protected:
@@ -38,6 +38,7 @@ protected:
             //lastUpdate = std::chrono::system_clock::now();
 
             std::string label = parts[2];
+            std::string spotter = parts[0];
             std::string comment = parts[3];
             std::string location = parts[5];
 
@@ -45,6 +46,7 @@ protected:
             // exists
             Spot spot = {
                 label,
+                spotter,
                 frequency,
                 spotTime,
                 comment,

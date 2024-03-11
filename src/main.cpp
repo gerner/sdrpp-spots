@@ -15,6 +15,8 @@
 #include "main.h"
 #include "sources/hamqth.h"
 #include "sources/pota.h"
+#include "sources/sota.h"
+#include "sources/wwff.h"
 //#include "sources/server.h"
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
@@ -49,9 +51,9 @@ std::string format_duration(std::chrono::system_clock::duration duration) {
     } else if(sec < 60) {
         snprintf(buf, bufsize, "%ld sec", sec);
     } else if(sec < 3600) {
-        snprintf(buf, bufsize, "%ld:%ld min", sec/60, sec%60);
+        snprintf(buf, bufsize, "%ld:%.2ld min", sec/60, sec%60);
     } else if(sec < 24*3600) {
-        snprintf(buf, bufsize, "%ld:%ld hrs", sec/3600, sec%3600/60);
+        snprintf(buf, bufsize, "%ld:.2%ld hrs", sec/3600, sec%3600/60);
     } else {
         strcpy(buf, "days");
     }
@@ -59,16 +61,17 @@ std::string format_duration(std::chrono::system_clock::duration duration) {
 }
 
 struct SpotSource {
-    SpotSource(std::string n, bool e, ImU32 c) : name(n), enabled(e), color(c) {}
-    SpotSource(std::string n, bool e, ImU32 c, std::unique_ptr<SpotProvider> p, AddSpot a, void* ctx) : name(n), enabled(e), color(c), provider(std::move(p)) {
+    SpotSource(std::string n, std::string l, bool e, ImU32 c) : name(n), label(l), enabled(e), color(c) {}
+    SpotSource(std::string n, std::string l, bool e, ImU32 c, std::unique_ptr<SpotProvider> p, AddSpot a, void* ctx) : name(n), label(l), enabled(e), color(c), provider(std::move(p)) {
         provider->registerAddSpot(a, this, ctx);
     }
-    SpotSource(SpotSource&& rhs) : name(rhs.name), enabled(rhs.enabled), color(rhs.color), provider(std::move(rhs.provider)) {
+    SpotSource(SpotSource&& rhs) : name(rhs.name), label(rhs.label), enabled(rhs.enabled), color(rhs.color), provider(std::move(rhs.provider)) {
         // need to re-register as this since the old this is gone
         provider->registerAddSpot(this);
     }
 
     std::string name;
+    std::string label;
     bool enabled;
     ImU32 color;
     std::unique_ptr<SpotProvider> provider;
@@ -101,9 +104,10 @@ public:
             config.conf[name]["autoStart"] = false;
             config.conf[name]["spotLifetime"] = 30;
             config.conf[name]["maxSpotLifetime"] = 240;
+            config.conf[name]["sources"] = json();
         }
 
-        //TODO: config initialization
+        // config initialization
         std::string hostname = config.conf[name]["host"];
         strcpy(host, hostname.c_str());
         port = config.conf[name]["port"];
@@ -129,9 +133,13 @@ public:
     }
 
     void postInit() {
-        spotSources.emplace_back("HamQTH ClusterDX", false, spotBgColor, std::make_unique<HamQTHProvider>(), &SpotsModule::addSpot, this);
-        spotSources.emplace_back("POTA.app spots", false, spotBgColor, std::make_unique<POTAProvider>(), &SpotsModule::addSpot, this);
-        //spotSources.emplace_back("Server spots", false, spotBgColor, std::make_unique<ServerProvider>(host, port), &SpotsModule::addSpot, this);
+        ImU32 color;
+        config.acquire();
+        addSource("hamqth", "HamQTH ClusterDX", false, IM_COL32(0x9F, 0xBB, 0xCC, 255), std::make_unique<HamQTHProvider>());
+        addSource("pota", "POTA.app spots", false, IM_COL32(0xCF, 0xFD, 0xBC, 255), std::make_unique<POTAProvider>());
+        addSource("sota", "SOTAwatch spots", false, IM_COL32(0xF9, 0x57, 0x38, 255), std::make_unique<SOTAProvider>());
+        addSource("wwff", "WWFF spots", false, IM_COL32(0x29, 0x73, 0x73, 255), std::make_unique<WWFFProvider>());
+        config.release(true);
     }
 
     void start() {
@@ -222,10 +230,16 @@ private:
                 ImVec4 color = ImGui::ColorConvertU32ToFloat4(source.color);
                 if (ImGui::ColorEdit4(CONCAT("Color##_spots_color_", source.name + _this->name), (float*)&color, ImGuiColorEditFlags_NoInputs)) {
                     source.color = ImGui::ColorConvertFloat4ToU32(color);
+                    config.acquire();
+                    config.conf[_this->name]["sources"][source.name]["enabled"] = source.color;
+                    config.release(true);
                 }
 
                 ImGui::TableSetColumnIndex(2);
                 if(ImGui::Checkbox(CONCAT("##_spots_", source.name + _this->name), &(source.enabled))) {
+                    config.acquire();
+                    config.conf[_this->name]["sources"][source.name]["enabled"] = source.enabled;
+                    config.release(true);
                     if (source.enabled && _this->running) {
                         source.provider->start();
                     } else {
@@ -405,9 +419,10 @@ private:
         ImGui::TextUnformatted(hoveredLabel.spot->spot.label.c_str());
         ImGui::Separator();
         ImGui::Text("Frequency: %s", utils::formatFreq(hoveredLabel.spot->spot.frequency).c_str());
+        ImGui::Text("Location: %s", hoveredLabel.spot->spot.location.c_str());
+        ImGui::Text("Spotter: %s", hoveredLabel.spot->spot.spotter.c_str());
         std::string lastSpotted = format_duration(std::chrono::system_clock::now() - hoveredLabel.spot->spot.spotTime) + " ago";
         ImGui::Text("Last spotted: %s", lastSpotted.c_str());
-        ImGui::Text("Location: %s", hoveredLabel.spot->spot.location.c_str());
         ImGui::Text("Comment: %s", hoveredLabel.spot->spot.comment.c_str());
         ImGui::EndTooltip();
     }
@@ -447,6 +462,25 @@ private:
             spot
         );
     }
+
+    void addSource(std::string sourceName, std::string label, bool defaultEnabled, ImU32 defaultColor, std::unique_ptr<SpotProvider>&& provider) {
+        flog::info("initializing source {0}", sourceName);
+        if (!config.conf[name]["sources"].contains(sourceName)) {
+            config.conf[name]["sources"][sourceName] = json(json::value_t::object);
+        }
+        json sourceConf = config.conf[name]["sources"][sourceName];
+
+        flog::info("getting params");
+        ImU32 color = sourceConf.value("color", defaultColor);
+        sourceConf["color"] = color;
+        bool enabled = sourceConf.value("enabled", defaultEnabled);
+        sourceConf["enabled"] = enabled;
+
+        flog::info("emplacing");
+        spotSources.emplace_back(sourceName, label, enabled, color,
+                std::move(provider), &SpotsModule::addSpot, this);
+    }
+
 
     char host[1024];
     int port = 6214;

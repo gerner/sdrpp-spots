@@ -80,6 +80,7 @@ int parseTime(const std::string &s, std::chrono::time_point<std::chrono::system_
 
 struct Spot {
     std::string label;
+    std::string spotter;
     double frequency;
     std::chrono::time_point<std::chrono::system_clock> spotTime;
     std::string comment;

@@ -244,6 +244,16 @@ private:
                         source.provider->start();
                     } else {
                         source.provider->stop();
+
+                        // remove any spots from that source
+                        std::lock_guard lk(_this->waterfallMutex);
+                        for (auto it = _this->waterfallSpots.begin(); it != _this->waterfallSpots.end();) {
+                            if (it->source == &source) {
+                                it = _this->waterfallSpots.erase(it);
+                            } else {
+                                it++;
+                            }
+                        }
                     }
                 }
             }
@@ -251,10 +261,6 @@ private:
         }
 
         ImGui::FillWidth();
-        if(ImGui::Button(CONCAT("Clear spots##_spots_clear_", _this->name), ImVec2(menuWidth, 0))) {
-            std::lock_guard lk(_this->waterfallMutex);
-            _this->waterfallSpots.clear();
-        }
 
         //start/stop server
         ImGui::FillWidth();
@@ -336,10 +342,7 @@ private:
                 }
             }
 
-            ImU32 bgColor = it->source->color;//_this->spotBgColor;
-            /*if (almost_equal(waterfallFreq, it->spot.frequency)) {
-                bgColor = _this->spotBgColorSelected;
-            }*/
+            ImU32 bgColor = it->source->color;
 
             if (it->spot.frequency >= args.lowFreq && it->spot.frequency <= args.highFreq) {
                 args.window->DrawList->AddLine(ImVec2(centerXpos, targetY), ImVec2(centerXpos, args.max.y), bgColor);
@@ -352,10 +355,11 @@ private:
 
             if (clampedRectMax.x - clampedRectMin.x > 0) {
                 _this->waterfallLabels.push_back({&(*it), rectMin, rectMax});
-                args.window->DrawList->AddRectFilled(clampedRectMin, clampedRectMax, bgColor);
-                /*if (almost_equal(waterfallFreq, it->spot.frequency)) {
-                    args.window->DrawList->AddRect(clampedRectMin, clampedRectMax, _this->spotBgColorSelected);
-                }*/
+                if (almost_equal(waterfallFreq, it->spot.frequency)) {
+                    args.window->DrawList->AddRectFilledMultiColor(clampedRectMin, clampedRectMax, bgColor, bgColor, _this->spotBgColorSelected, bgColor);
+                } else {
+                    args.window->DrawList->AddRectFilled(clampedRectMin, clampedRectMax, bgColor);
+                }
                 args.window->DrawList->AddText(ImVec2(centerXpos - (nameSize.x / 2), targetY), _this->spotTextColor, it->spot.label.c_str());
             }
 

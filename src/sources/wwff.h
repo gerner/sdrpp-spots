@@ -14,7 +14,9 @@ protected:
         try {
             for(const auto& jsonSpot : jsonSpots.items()) {
                 std::string label = jsonSpot.value().value("ACTIVATOR", "");
+                std::transform(label.begin(), label.end(), label.begin(), ::toupper);
                 std::string spotter = jsonSpot.value().value("SPOTTER", "");
+                std::transform(spotter.begin(), spotter.end(), spotter.begin(), ::toupper);
                 double frequency = std::stod(jsonSpot.value().value("QRG", "0"))*1000;
                 std::tm t = {};
                 int y,M,d,h,m,s;

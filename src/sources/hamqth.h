@@ -40,7 +40,7 @@ protected:
             std::string label = parts[2];
             std::string spotter = parts[0];
             std::string comment = parts[3];
-            std::string location = parts[5];
+            std::string location = parts[9];
 
             // the spot we'll insert into the list, even if it already
             // exists
